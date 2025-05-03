@@ -97,8 +97,17 @@
     </div>
 
     <script>
-        // 1. Création de la connexion WebSocket (Mise en premier - DOIT ÊTRE GLOBALE)
-        const websocket = new WebSocket('ws://localhost:8080');
+        // 1. Création de la connexion WebSocket
+// Utiliser l'hôte actuel (localhost:8080 en local, ou your-app.vercel.app en production)
+// Utiliser wss si la page est en HTTPS (ce qui sera le cas sur Vercel)
+const websocketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const websocketHost = window.location.host;
+const websocket = new WebSocket(`${websocketProtocol}//${websocketHost}`); // *** MODIFIÉ ***
+
+console.log(`Attempting WebSocket connection to ${websocketProtocol}//${websocketHost}`); // Log pour vérifier l'adresse
+
+
+// ... (reste du script) ...
         console.log('WebSocket object created.');
 
         // 2. Déclaration de TOUTES les variables globales (non DOM) (Mise en deuxième - DOIVENT ÊTRE GLOBALES)
