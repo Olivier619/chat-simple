@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Simple - Conversations</title>
+    <style>
+        /* Styles CSS (inchangés) */
+        body { font-family: sans-serif; margin: 20px; display: flex; flex-direction: column; height: calc(100vh - 40px); }
+        h1 { margin-top: 0;}
+        #conversation-select { margin-bottom: 10px; }
+        #conversation-select button { margin-right: 5px; padding: 5px 10px; cursor: pointer; border: 1px solid #ccc; background-color: #eee; }
+        #conversation-select button.active { background-color: #007bff; color: white; border-color: #007bff; }
+        #conversation-select button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #create-group-panel { margin-bottom: 10px; border: 1px dashed #ccc; padding: 10px; }
+        #create-group-panel input[type="text"] { padding: 5px; margin-right: 5px; }
+        #create-group-panel button { padding: 5px 10px; cursor: pointer; }
+        .container { display: flex; flex-grow: 1; margin-bottom: 10px; }
+        #chatbox { border: 1px solid #ccc; padding: 10px; flex-grow: 1; overflow-y: scroll; margin-right: 10px; display: flex; flex-direction: column-reverse; word-break: break-word; }
+        .message { margin-bottom: 5px; }
+        .message strong { color: #007bff; }
+        .message:first-child { margin-bottom: 0; }
+        #userlist { border: 1px solid #ccc; padding: 10px; width: 150px; overflow-y: auto; flex-shrink: 0; }
+        #userlist ul { list-style: none; padding: 0; margin: 0;}
+        #userlist li { margin-bottom: 3px; color: #555; }
+        #userlist li strong { color: #000; }
+        #userlist #admin-display { font-size: 0.9em; margin-top: 10px; border-top: 1px solid #eee; padding-top: 8px; }
+        #userlist #admin-display strong { color: #000; font-weight: normal;}
+        #typing-indicator { height: 1em; margin-top: -10px; margin-bottom: 10px; font-style: italic; color: #888; visibility: hidden; }
+        #admin-panel { border: 1px dashed #ccc; padding: 10px; margin-bottom: 10px; }
+        #admin-panel input[type="text"] { padding: 5px; margin-right: 5px; }
+        #admin-panel button { padding: 5px 10px; cursor: pointer; }
+        #admin-panel .admin-list-container { margin-top: 15px; }
+        #admin-panel .admin-list-container ul { list-style: disc; padding-left: 20px; margin-top: 5px; }
+        .input-area { display: flex; }
+        #message { flex-grow: 1; padding: 8px; margin-right: 5px; box-sizing: border-box; }
+        #sendButton { padding: 8px 15px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <h1>Chat Simple - Conversations</h1>
+
+    <!-- Interface de création de groupe -->
+    <div id="create-group-panel">
+        <strong>Créer une nouvelle conversation</strong>
+        <div>
+            <input type="text" id="new-conversation-name" placeholder="Nom de la conversation">
+            <button id="create-conversation-button">Créer</button>
+        </div>
+    </div>
+
+    <!-- Zone pour les boutons de sélection de conversation (filtrée par autorisation) -->
+    <div id="conversation-select">
+         Chargement des conversations...
+         <!-- Les boutons seront ajoutés ici par JavaScript -->
+    </div>
+
+    <!-- Élément pour l'indicateur de frappe -->
+    <div id="typing-indicator"></div>
+
+    <!-- Interface d'administration (cachée par défaut) -->
+     <div id="admin-panel" style="display: none;">
+         <strong>Gestion des membres (Admin)</strong>
+         <p>Ajouter/Supprimer un utilisateur autorisé pour cette conversation :</p>
+         <div>
+             <input type="text" id="manage-user-name" placeholder="Nom de l'utilisateur">
+             <button id="add-user-button">Ajouter</button>
+             <button id="remove-user-button">Supprimer</button>
+         </div>
+
+         <!-- Zone pour afficher la liste des utilisateurs autorisés -->
+         <div class="admin-list-container">
+             <strong>Autorisés dans cette conversation :</strong>
+             <ul id="authorized-users-list">
+                 <!-- Les noms seront ajoutés ici par JavaScript -->
+                 <li>(Chargement...)</li>
+             </ul>
+         </div>
+     </div>
+
+    <div class="container">
+        <div id="chatbox">
+             <!-- Les messages reçus (historique + nouveaux) s'afficheront ici -->
+        </div>
+        <div id="userlist">
+             <strong>Connectés:</strong>
+             <ul></ul>
+             <!-- Élément pour afficher l'admin -->
+             <p id="admin-display"><strong>Admin :</strong> <span id="current-admin-name">aucun</span></p>
+        </div>
+    </div>
+
+    <div class="input-area">
+         <input type="text" id="message" placeholder="Tapez votre message..." disabled> <!-- Désactivé par défaut -->
+         <button id="sendButton" disabled>Envoyer</button> <!-- Désactivé par défaut -->
+    </div>
+
+    <script>
+        // 1. Création de la connexion WebSocket (Mise en premier - DOIT ÊTRE GLOBALE)
+        const websocket = new WebSocket('ws://localhost:8080');
+        console.log('WebSocket object created.');
+
+        // 2. Déclaration de TOUTES les variables globales (non DOM) (Mise en deuxième - DOIVENT ÊTRE GLOBALES)
+        // Ces variables sont utilisées dans les fonctions DANS DOMContentLoaded mais sont globales.
+        let userName = null;
+        let activeConversationId = null;
+        let currentConversationAdmin = null;
+        let isClientAdminOfActiveConv = false;
+        let isTyping = false;
+        let typingTimer;
+        const TYPING_TIMEOUT = 1500;
+
+        // *** NOUVEAU : Clé VAPID publique du serveur (REMPLACER) ***
+        // Assurez-vous que cette clé est correcte, elle vient de 'npx web-push generate-vapid-keys'
+        // Elle est utilisée pour créer l'abonnement côté client.
+        const applicationServerKey = 'REMPLACEZ_PAR_VOTRE_CLE_PUBLIQUE'; // Ex: 'BXXXXXXXXXXXXXXXX...'
+
+
+        // 3. Écouteur d'événement DOMContentLoaded (qui va contenir TOUT le reste du script JavaScript)
+        // Ce code s'exécute seulement après que le navigateur a fini de charger la structure HTML de la page.
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('DOMContentLoaded fired. Setting up application...');
+
+            // 4. Récupération de TOUS les éléments HTML DANS DOMContentLoaded (Mise en premier DANS l'écouteur)
+            // Ces variables sont déclarées avec 'const' et assignées ICI. Elles sont locales à l'écouteur DOMContentLoaded.
+            // Comme TOUT le code qui les utilise (définitions de fonctions, gestionnaires, écouteurs, appels initiaux) est AUSSI DANS cet écouteur, elles seront accessibles.
+            const chatbox = document.getElementById('chatbox');
+            const messageInput = document.getElementById('message');
+            const sendButton = document.getElementById('sendButton');
+            const userListElement = document.querySelector('#userlist ul');
+            const conversationSelectElement = document.getElementById('conversation-select');
+            const typingIndicatorElement = document.getElementById('typing-indicator');
+            const currentAdminNameElement = document.getElementById('current-admin-name');
+            const adminDisplayElement = document.getElementById('admin-display');
+            const adminPanelElement = document.getElementById('admin-panel');
+            const manageUserNameInput = document.getElementById('manage-user-name');
+            const addUserButton = document.getElementById('add-user-button');
+            const removeUserButton = document.getElementById('remove-user-button');
+            const authorizedUsersListElement = document.getElementById('authorized-users-list');
+            const newConversationNameInput = document.getElementById('new-conversation-name');
+            const createConversationButton = document.getElementById('create-conversation-button');
+
+            // Vérification optionnelle que tous les éléments ont été trouvés (utile pour débogage HTML)
+             if (!chatbox || !messageInput || !sendButton || !userListElement || !conversationSelectElement ||
+                 !typingIndicatorElement || !currentAdminNameElement || !adminDisplayElement || !adminPanelElement ||
+                 !manageUserNameInput || !addUserButton || !removeUserButton || !authorizedUsersListElement ||
+                 !newConversationNameInput || !createConversationButton ) {
+                  console.error("ERREUR FATALE : Certains éléments HTML nécessaires n'ont pas été trouvés ! Vérifiez vos IDs dans le HTML.");
+                  // Afficher un message visible à l'utilisateur si des éléments manquent et arrêter le script
+                  document.body.innerHTML = '<h1>Erreur de chargement de l\'interface</h1><p>Des éléments nécessaires n\'ont pas été trouvés dans la page HTML. Vérifiez les IDs dans le code source.</p>';
+                  return; // Arrêter l'exécution du script si des éléments manquent
+             }
+             console.log("Tous les éléments HTML nécessaires trouvés.");
+
+
+            // Les variables globales (non DOM) sont définies avant l'écouteur.
+
+            // 5. Définition de TOUTES les fonctions DANS DOMContentLoaded (Mise en deuxième DANS l'écouteur)
+            // Ces fonctions sont définies ici et peuvent accéder aux variables locales (éléments DOM)
+            // et aux variables globales définies avant l'écouteur.
+
+            // Fonction utilitaire pour ajouter un message à la boîte de chat
+            function appendMessage(sender, message, timestamp = null) {
+                const messageElement = document.createElement('div');
+                messageElement.classList.add('message');
+
+                // --- Formatage du timestamp ---
+                let timeStr = '';
+                if (timestamp) {
+                     try {
+                         const date = new Date(timestamp);
+                         if (!isNaN(date)) {
+                             const hours = date.getHours().toString().padStart(2, '0');
+                             const minutes = date.getMinutes().toString().padStart(2, '0');
+                             const seconds = date.getSeconds().toString().padStart(2, '0');
+                             timeStr = `(${hours}:${minutes}:${seconds}) `;
+                         } else {
+                             timeStr = '(Date invalide) ';
+                         }
+                     } catch (e) {
+                         console.error("Erreur de parsing timestamp:", timestamp, e);
+                         timeStr = '(Heure invalide) ';
+                     }
+                }
+
+                 const displaySender = (sender === userName && userName !== null && sender !== 'Système' && sender !== 'Erreur') ? 'Moi' : sender;
+
+                 const senderSpan = document.createElement('strong');
+                 senderSpan.textContent = `${timeStr}${displaySender}: `;
+
+                 const messageTextNode = document.createTextNode(message);
+
+                 messageElement.appendChild(senderSpan);
+                 messageElement.appendChild(messageTextNode);
+
+                chatbox.prepend(messageElement);
+                chatbox.scrollTop = 0;
+            }
+
+            // Fonctions de contrôle de l'interface (qui manipulent les éléments DOM)
+            function toggleInput(enabled) {
+                messageInput.disabled = !enabled;
+                sendButton.disabled = !enabled;
+                if(enabled) {
+                    messageInput.focus();
+                } else {
+                     updateTypingIndicator([]); // Appelle updateTypingIndicator (qui utilise typingIndicatorElement)
+                     if (isTyping) sendTypingStatus(false); // Appelle sendTypingStatus
+                }
+            }
+
+            function toggleConversationButtons(enabled) {
+                 document.querySelectorAll('#conversation-select button').forEach(button => button.disabled = !enabled);
+            }
+
+            function toggleCreateGroupInput(enabled) {
+                 newConversationNameInput.disabled = !enabled;
+                 createConversationButton.disabled = !enabled;
+                 if(!enabled) {
+                     newConversationNameInput.value = '';
+                 }
+            }
+
+            function updateTypingIndicator(typingUsers) {
+                 if (!activeConversationId) {
+                      typingIndicatorElement.textContent = '';
+                      typingIndicatorElement.style.visibility = 'hidden';
+                      return;
+                 }
+                const otherTypingUsers = typingUsers.filter(user => user !== userName);
+                let text = '';
+                if (otherTypingUsers.length === 0) { text = ''; }
+                else if (otherTypingUsers.length === 1) { text = `${otherTypingUsers[0]} est en train d'écrire...`; }
+                else if (otherTypingUsers.length === 2) { text = `${otherTypingUsers.join(' et ')} sont en train d'écrire...`; }
+                else { text = `${otherTypingUsers.slice(0, 2).join(', ')} et ${otherTypingUsers.length - 2} autre(s) personne(s) sont en train d'écrire...`; }
+                typingIndicatorElement.textContent = text;
+                typingIndicatorElement.style.visibility = text ? 'visible' : 'hidden';
+            }
+
+            function updateUserList(users) {
+                 if (!activeConversationId) {
+                     userListElement.innerHTML = '';
+                     return;
+                 }
+                userListElement.innerHTML = '';
+                if (!users || users.length === 0) {
+                     const li = document.createElement('li');
+                     li.textContent = "Aucun autre utilisateur connecté.";
+                     userListElement.appendChild(li);
+                } else {
+                    users.forEach(user => {
+                        const li = document.createElement('li');
+                        li.textContent = user;
+                        if (user === userName && userName !== null) {
+                            li.style.fontWeight = 'bold';
+                            li.style.color = '#000';
+                        }
+                         if (currentConversationAdmin && user === currentConversationAdmin) {
+                             li.style.fontStyle = 'italic';
+                         }
+                        userListElement.appendChild(li);
+                    });
+                }
+            }
+
+            function updateAdminDisplay(adminName = null, isAdminStatus = null) {
+                 if (adminName === null) adminName = currentConversationAdmin;
+                 if (isAdminStatus === null) isAdminStatus = isClientAdminOfActiveConv;
+
+                currentConversationAdmin = adminName;
+                isClientAdminOfActiveConv = isAdminStatus;
+
+                if (currentConversationAdmin) {
+                     currentAdminNameElement.textContent = currentConversationAdmin;
+                     if (isClientAdminOfActiveConv) {
+                         currentAdminNameElement.textContent += " (You)";
+                     }
+                     adminDisplayElement.style.display = '';
+                } else {
+                     currentAdminNameElement.textContent = "none";
+                }
+
+                 if (isClientAdminOfActiveConv && activeConversationId) {
+                     adminPanelElement.style.display = 'block';
+                     if (websocket.readyState === WebSocket.OPEN) {
+                          console.log(`Client is admin of "${activeConversationId}". Requesting allowed users list...`);
+                           authorizedUsersListElement.innerHTML = '<li>(Loading...)</li>';
+                          websocket.send(JSON.stringify({
+                              type: 'requestAllowedUsers',
+                              conversationId: activeConversationId
+                          }));
+                     } else {
+                          console.warn('Client is admin locally but WebSocket not open?');
+                           authorizedUsersListElement.innerHTML = '<li>(Connection Error)</li>';
+                     }
+                 } else {
+                     adminPanelElement.style.display = 'none';
+                     manageUserNameInput.value = '';
+                     authorizedUsersListElement.innerHTML = '';
+                 }
+
+                 const currentlyListedUsers = Array.from(userListElement.querySelectorAll('li'))
+                     .map(li => li.textContent.replace(/ \((You|Admin|est en train d'écrire\.\.\.)\)/g, '').trim());
+                 updateUserList(currentlyListedUsers);
+            }
+
+            function renderAllowedUsersList(users) {
+                 if (!activeConversationId || !isClientAdminOfActiveConv) {
+                      console.warn('renderAllowedUsersList called without active conversation or client not admin');
+                      authorizedUsersListElement.innerHTML = '<li>(Not relevant)</li>';
+                      return;
+                 }
+
+                authorizedUsersListElement.innerHTML = '';
+                if (!users || users.length === 0) {
+                     const li = document.createElement('li');
+                     li.textContent = "No authorized users.";
+                     authorizedUsersListElement.appendChild(li);
+                } else {
+                     users.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+                    users.forEach(user => {
+                        const li = document.createElement('li');
+                        li.textContent = user;
+                         if (currentConversationAdmin && user === currentConversationAdmin) {
+                             li.style.fontWeight = 'bold';
+                         }
+                        authorizedUsersListElement.appendChild(li);
+                    });
+                }
+            }
+
+
+            // Fonctions de logique principale
+            function askForName() {
+                let name = prompt("Please enter your name:");
+                if (name === null) {
+                    console.warn('Name prompt cancelled or blocked.');
+                    appendMessage('System', 'Name required to chat. Please reload the page in an active tab if name prompt does not appear.');
+                     toggleInput(false);
+                     toggleConversationButtons(false);
+                     toggleCreateGroupInput(false);
+                } else {
+                    name = name.trim();
+                    if (name === '') {
+                        console.warn('Empty name entered.');
+                        appendMessage('System', 'Name cannot be empty. Please reload the page.');
+                         toggleInput(false);
+                         toggleConversationButtons(false);
+                         toggleCreateGroupInput(false);
+                    } else {
+                        userName = name.substring(0, 20);
+                        console.log(`Local username set: ${userName}`);
+                        websocket.send(JSON.stringify({ type: 'setName', name: userName }));
+                    }
+                }
+            }
+
+            function joinConversation(conversationId) {
+                 if (websocket.readyState !== WebSocket.OPEN) {
+                     console.warn('Cannot join conversation, connection not open.');
+                     appendMessage('System', 'Cannot join conversation, connection not established.');
+                     return;
+                 }
+                  if (!userName) {
+                      console.warn('Cannot join conversation, username not set.');
+                      appendMessage('System', 'Please set your username before joining a conversation.');
+                      askForName();
+                      return;
+                  }
+                if (conversationId === activeConversationId) {
+                    console.log(`Already in conversation "${conversationId}".`);
+                    return;
+                }
+
+                console.log(`Requesting to join conversation "${conversationId}"...`);
+                chatbox.innerHTML = '';
+                userListElement.innerHTML = '';
+                updateTypingIndicator([]);
+                updateAdminDisplay(null, false);
+
+                toggleInput(false);
+                toggleConversationButtons(false);
+                toggleCreateGroupInput(false);
+
+
+                document.querySelectorAll('#conversation-select button').forEach(button => {
+                    if (button.dataset.conversationId === conversationId) {
+                        button.classList.add('active');
+                    } else {
+                        button.classList.remove('active');
+                    }
+                });
+
+                 activeConversationId = conversationId;
+                 console.log(`Client local activeConversationId updated to "${activeConversationId}".`);
+
+                websocket.send(JSON.stringify({ type: 'joinConversation', conversationId: conversationId }));
+            }
+
+            function sendMessage() {
+                if (websocket.readyState === WebSocket.OPEN && userName && activeConversationId && !messageInput.disabled) {
+                    const messageText = messageInput.value;
+                    if (messageText.trim() !== '') {
+                        sendTypingStatus(false);
+                        websocket.send(JSON.stringify({
+                            type: 'message',
+                            conversationId: activeConversationId,
+                            text: messageText
+                        }));
+                        messageInput.value = '';
+                    }
+                } else {
+                     console.warn('Attempted to send message while not connected, identified, or input disabled.');
+                     if (!userName) appendMessage('System', 'Please identify yourself before sending a message.');
+                     else if (!activeConversationId) appendMessage('System', 'Please join a conversation before sending a message.');
+                     else if (messageInput && messageInput.disabled) appendMessage('System', 'Sending messages is disabled.');
+                     else appendMessage('System', 'Cannot send message at this time.');
+                }
+            }
+
+            function sendTypingStatus(typing) {
+                if (websocket.readyState === WebSocket.OPEN && userName && activeConversationId && typeof isTyping === 'boolean' && isTyping !== typing) {
+                     isTyping = typing;
+                     websocket.send(JSON.stringify({
+                         type: 'typing',
+                         conversationId: activeConversationId,
+                         isTyping: typing
+                     }));
+                }
+            }
+
+            function sendManageMembershipCommand(action) {
+                if (websocket.readyState === WebSocket.OPEN && userName && activeConversationId && isClientAdminOfActiveConv) {
+                    const targetUserName = manageUserNameInput.value.trim();
+
+                    if (targetUserName === '') {
+                        appendMessage('System', 'Please enter a username to manage members.');
+                        return;
+                    }
+                    if (action === 'remove' && targetUserName === userName) {
+                         appendMessage('System', 'You cannot remove yourself from the authorized users list.');
+                         manageUserNameInput.value = '';
+                         return;
+                    }
+
+                    console.log(`Sending admin command "${action}" for "${targetUserName}" in conv "${activeConversationId}"`);
+                    websocket.send(JSON.stringify({
+                        type: 'manageMembership',
+                        conversationId: activeConversationId,
+                        action: action,
+                        userName: targetUserName
+                    }));
+
+                    manageUserNameInput.value = '';
+                } else {
+                     console.warn('Attempted to send admin command without being admin or in active conversation.');
+                     appendMessage('System', 'You are not authorized to manage members here.');
+                }
+            }
+
+            function requestCreateConversation() {
+                 if (websocket.readyState === WebSocket.OPEN && userName) {
+                     const conversationName = newConversationNameInput.value.trim();
+
+                     if (conversationName === '') {
+                         appendMessage('System', 'New conversation name cannot be empty.');
+                         return;
+                     }
+                      if (conversationName.length > 20) {
+                           appendMessage('System', 'Conversation name is too long (max 20 characters).');
+                           return;
+                      }
+                       if (!/^[a-zA-Z0-9_-]+$/.test(conversationName)) {
+                           appendMessage('System', 'Conversation name can only contain letters, numbers, hyphens (-), and underscores (_).');
+                           return;
+                       }
+
+                     console.log(`Requesting conversation creation "${conversationName}" by ${userName}.`);
+                     websocket.send(JSON.stringify({
+                         type: 'createConversation',
+                         name: conversationName
+                     }));
+
+                      toggleCreateGroupInput(false);
+                      newConversationNameInput.value = '';
+
+                      appendMessage('System', `Creating conversation "${conversationName}"...`);
+
+                 } else {
+                      console.warn('Attempted to create conversation while not connected or identified.');
+                      appendMessage('System', 'Please identify yourself before creating a conversation.');
+                 }
+             }
+
+
+            // 6. Gestionnaires d'événements WebSocket (Définis ici DANS DOMContentLoaded)
+            // Ces fonctions sont définies et peuvent accéder aux variables locales (éléments DOM)
+            // et aux variables globales définies avant l'écouteur.
+            function onWebSocketOpen(event) {
+                console.log('Connexion WebSocket établie.');
+                console.log('onWebSocketOpen finished. Waiting for messages...');
+                 // Tenter de s'abonner aux Push Notifications juste après l'ouverture de la WebSocket
+                 // (Cela déclenchera la demande de permission et l'envoi de l'abonnement au serveur si réussi)
+                 subscribeUserForPush(); // *** DÉCLENCHE LE FLUX DE NOTIFICATIONS PUSH ICI ***
+
+            }
+
+            function onWebSocketMessage(event) {
+                console.log('Message received from server:', event.data);
+                const receivedMessageRaw = event.data;
+                let message;
+                try {
+                    message = JSON.parse(receivedMessageRaw);
+                } catch (error) {
+                    console.error('Erreur lors du parsing JSON du message reçu :', error);
+                    appendMessage('Erreur serveur', receivedMessageRaw);
+                    return;
+                }
+                console.log('Parsed message:', message);
+
+                switch (message.type) {
+                     case 'availableConversations':
+                         console.log('Handling availableConversations message.');
+                         if (Array.isArray(message.conversations)) {
+                             conversationSelectElement.innerHTML = '';
+                             if (message.conversations.length === 0) {
+                                 conversationSelectElement.textContent = "You are not authorized in any predefined conversations.";
+                             } else {
+                                 const title = document.createElement('strong');
+                                 title.textContent = "Your conversations : ";
+                                 conversationSelectElement.appendChild(title);
+                                  message.conversations.forEach(convId => {
+                                      const button = document.createElement('button');
+                                      button.textContent = convId;
+                                      button.dataset.conversationId = convId;
+                                      button.addEventListener('click', () => joinConversation(convId));
+                                      conversationSelectElement.appendChild(button);
+                                  });
+                              }
+
+                             console.log('List of available conversations received (filtered by authorization).', message.conversations);
+
+                              toggleConversationButtons(true);
+                              toggleCreateGroupInput(true);
+
+                         } else {
+                              console.warn('Malformed availableConversations message:', message);
+                         }
+                         break;
+
+                    case 'system':
+                        console.log('Handling system message:', message.text);
+                        appendMessage('System', message.text);
+                         // Le serveur envoie le message de bienvenue APRES que setName soit traité
+                         // OU si le nom est invalide
+                        if (message.text.includes('Bienvenue sur le serveur de chat simple !') || message.text.includes('Welcome')) {
+                            // Si le nom n'est pas encore défini, on le demande.
+                            // Si le nom EST déjà défini (parce que setName a réussi), on ne redemande pas.
+                            // L'envoi de availableConversations suit normalement setName réussi.
+                            // Si l'utilisateur a entré un nom invalide, le serveur peut aussi renvoyer ce message.
+                            // Pour simplifier, on appelle askForName() seulement si userName est null
+                            if (!userName) {
+                                console.log('Detected welcome message and username is null. Calling askForName()...');
+                                askForName();
+                            } else {
+                                console.log('Detected welcome message but username already set.');
+                            }
+
+                        }
+                         // Si c'est la confirmation de nom par le serveur
+                        if (message.text.includes(`You are now known as`) || message.text.includes(`Vous êtes maintenant connu sous le nom de`)) {
+                             console.log('Server confirmed username.');
+                              // Si un abonnement Push a été déferré (parce que userName n'était pas prêt avant),
+                              // c'est le moment d'essayer de l'envoyer au serveur.
+                              // Ce cas n'est pas géré explicitement ici (deferring), mais c'est là qu'on le ferait.
+                        }
+                         // Si c'est le message de déconnexion administrative (code 4000)
+                         if (message.text.includes('retiré de la conversation par l\'administrateur') || message.text.includes('removed from conversation by admin')) {
+                              // On n'a pas besoin de faire grand chose ici, le onclose handler gère déjà la déconnexion.
+                             console.log('Received administrative removal system message.');
+                         }
+
+                        break; // Fin du case 'system'
+
+                    case 'message':
+                        console.log('Handling message:', message);
+                        if (message.conversationId === activeConversationId && message.user && message.text) {
+                             appendMessage(message.user, message.text, message.timestamp);
+                        } else if (message.conversationId !== activeConversationId) {
+                             console.log(`Ignoring message for inactive conversation "${message.conversationId}".`);
+                             // Optionnel : Afficher une notification dans l'UI pour les messages dans d'autres conversations
+                             // showNotificationBadge(message.conversationId);
+                         } else {
+                             console.warn('Malformed message received:', message);
+                         }
+                        break;
+                    case 'error':
+                        console.log('Handling error message:', message.text);
+                        appendMessage('Error', message.text);
+                        break;
+                    case 'userList':
+                        console.log('Handling userList message:', message);
+                        if (message.conversationId === activeConversationId && Array.isArray(message.users)) {
+                            updateUserList(message.users);
+                             toggleInput(true);
+                             toggleConversationButtons(true);
+                             toggleCreateGroupInput(true);
+                        } else if (message.conversationId !== activeConversationId) {
+                             console.log(`Ignoring userList for inactive conversation "${message.conversationId}".`);
+                         } else {
+                             console.warn('Malformed userList message:', message);
+                         }
+                        break;
+
+                     case 'typingStatus':
+                         console.log('Handling typingStatus message:', message);
+                         if (message.conversationId === activeConversationId && Array.isArray(message.typingUsers)) {
+                             updateTypingIndicator(message.typingUsers);
+                         } else if (message.conversationId !== activeConversationId) {
+                             console.log(`Ignoring typingStatus for inactive conversation "${message.conversationId}".`);
+                          } else {
+                              console.warn('Malformed typingStatus message:', message);
+                          }
+                         break;
+
+                     case 'conversationInfo':
+                         console.log('Handling conversationInfo message:', message);
+                         if (message.conversationId === activeConversationId && typeof message.isAdmin === 'boolean') {
+                              currentConversationAdmin = message.adminUser;
+                              isClientAdminOfActiveConv = message.isAdmin;
+
+                              console.log(`Conv info for "${message.conversationId}" received. Admin: ${currentConversationAdmin || 'none'}. Client is admin: ${isClientAdminOfActiveConv}`);
+
+                               updateAdminDisplay(currentConversationAdmin, isClientAdminOfActiveConv);
+
+                         } else if (message.conversationId !== activeConversationId) {
+                              console.log(`Ignoring conversationInfo for inactive conversation "${message.conversationId}".`);
+                          } else {
+                              console.warn('Malformed conversationInfo message:', message);
+                          }
+                         break;
+
+                     case 'allowedUsersList':
+                         console.log('Handling allowedUsersList message:', message);
+                         if (message.conversationId === activeConversationId && isClientAdminOfActiveConv && Array.isArray(message.users)) {
+                              console.log(`Allowed users list received for conv "${message.conversationId}":`, message.users);
+                              renderAllowedUsersList(message.users);
+                         } else if (message.conversationId !== activeConversationId) {
+                              console.log(`Ignoring allowedUsersList for inactive conversation "${message.conversationId}".`);
+                          } else {
+                              console.warn('Malformed allowedUsersList message:', message);
+                               if (authorizedUsersListElement) authorizedUsersListElement.innerHTML = '<li>(Error receiving authorized list)</li>';
+                          }
+                         break;
+
+                    default:
+                         console.warn('Unknown message type received:', message.type, message);
+                 }
+             };
+
+             function onWebSocketClose(event) {
+                 console.log('WebSocket connection closed:', event.code, event.reason);
+                  if (event.code !== 1000) {
+                       appendMessage('System', `Connection closed (Code: ${event.code}, Reason: ${event.reason || 'none'}).`);
+                  } else {
+                       appendMessage('System', 'Connection closed.');
+                  }
+                 toggleInput(false);
+                 updateUserList([]);
+                  updateTypingIndicator([]);
+                 activeConversationId = null;
+                 updateAdminDisplay(null, false);
+                 toggleConversationButtons(false);
+                  if (conversationSelectElement) document.querySelectorAll('#conversation-select button').forEach(button => button.classList.remove('active'));
+                 toggleCreateGroupInput(false);
+                 clearTimeout(typingTimer);
+                  isTyping = false;
+
+                  console.log('WebSocket connection closed. Interface disabled.');
+             }
+
+             function onWebSocketError(error) {
+                 console.error('WebSocket error:', error);
+                 appendMessage('System', 'Connection error.');
+                 toggleInput(false);
+                 toggleConversationButtons(false);
+                 toggleCreateGroupInput(false);
+                 updateAdminDisplay(null, false);
+                 clearTimeout(typingTimer);
+                  isTyping = false;
+
+                   console.log('WebSocket error. Interface disabled.');
+             }
+
+             // Fonctions pour gérer les notifications Push
+             // Demander la permission et s'abonner aux notifications
+            function subscribeUserForPush() {
+                // Vérifier si les notifications Push sont supportées par le navigateur
+                if (!('Notification' in window)) {
+                    console.warn('Notifications are not supported in this browser.');
+                     appendMessage('System', 'Notifications are not supported in your browser.');
+                    return;
+                }
+                if (!('serviceWorker' in navigator)) {
+                    console.warn('Service workers are not supported in this browser.');
+                     appendMessage('System', 'Service workers are not supported in your browser.');
+                    return;
+                }
+                if (!('PushManager' in window)) {
+                    console.warn('Push messaging is not supported.');
+                     appendMessage('System', 'Push messaging is not supported.');
+                    return;
+                }
+
+                // Enregistrer le Service Worker
+                // Le fichier service-worker.js doit être placé dans le même dossier que index.html
+                navigator.serviceWorker.register('service-worker.js')
+                    .then(function(registration) {
+                        console.log('Service Worker registered successfully:', registration);
+
+                        // Tenter de s'abonner (ou récupérer l'abonnement existant)
+                        registration.pushManager.getSubscription()
+                            .then(function(subscription) {
+                                if (subscription) {
+                                    console.log('Existing Push Subscription found:', subscription);
+                                    // Envoyer l'abonnement existant au serveur (utile si l'utilisateur se reconnecte)
+                                    // On attend que le userName soit défini avant d'envoyer (voir case 'system')
+                                    // Pour l'instant, on ne gère pas le déferrement explicite ici, mais c'est là qu'il commencerait.
+                                    if (websocket.readyState === WebSocket.OPEN && userName) {
+                                         console.log('Sending existing subscription to server...');
+                                         sendSubscriptionToServer(subscription);
+                                    } else {
+                                        console.warn('WebSocket not ready or username not set, deferring sending existing subscription.');
+                                    }
+
+                                } else {
+                                    console.log('No existing Push Subscription found. Attempting to subscribe...');
+
+                                    // Demander la permission si ce n'est pas déjà fait
+                                    Notification.requestPermission().then(function(permission) {
+                                        if (permission === 'granted') {
+                                            console.log('Notification permission granted.');
+
+                                            // S'abonner réellement
+                                            registration.pushManager.subscribe({
+                                                userVisibleOnly: true,
+                                                applicationServerKey: urlBase64ToUint8Array(applicationServerKey) // applicationServerKey global
+                                            })
+                                            .then(function(newSubscription) {
+                                                console.log('New Push Subscription created:', newSubscription);
+                                                // Envoyer le nouvel abonnement au serveur
+                                                if (websocket.readyState === WebSocket.OPEN && userName) {
+                                                     console.log('Sending new subscription to server...');
+                                                     sendSubscriptionToServer(newSubscription);
+                                                } else {
+                                                     console.warn('WebSocket not ready or username not set, cannot send new subscription.');
+                                                    // Gérer le déferrement
+                                                }
+                                            })
+                                            .catch(function(e) {
+                                                console.error('Failed to subscribe to Push:', e);
+                                                 appendMessage('System', `Failed to subscribe to notifications: ${e.message}`);
+                                            });
+
+                                        } else {
+                                            console.warn('Notification permission denied.');
+                                             appendMessage('System', 'Notifications denied by user.');
+                                        }
+                                    });
+
+                                }
+                            });
+                    })
+                    .catch(function(error) {
+                        console.error('Service Worker registration failed:', error);
+                         appendMessage('System', `Failed to load notifications: ${error.message}`);
+                    });
+            }
+
+            // Fonction pour envoyer l'objet d'abonnement au serveur
+            function sendSubscriptionToServer(subscription) {
+                // S'assurer que l'utilisateur est identifié avant d'envoyer l'abonnement
+                 // Ce check est aussi fait dans le handler onmessage case 'system' pour setName confirmation
+                 if (!userName) {
+                     console.warn('Username not set, cannot send subscription to server.');
+                     // Si l'abonnement a été créé mais que le nom n'était pas prêt, on pourrait le stocker
+                     // et le renvoyer après avoir reçu la confirmation setName.
+                     // Ex: deferredSubscriptionToSend = subscription;
+                     return; // Ne pas envoyer maintenant
+                 }
+
+                websocket.send(JSON.stringify({
+                    type: 'saveSubscription',
+                    subscription: subscription
+                }));
+                 console.log(`Subscription sent to server for user ${userName}.`);
+                 // Si l'envoi est déferré, on peut nullifier l'abonnement déferré ici.
+                 // deferredSubscriptionToSend = null;
+            }
+
+             // Helper function pour convertir la clé VAPID (base64) en Uint8Array
+             function urlBase64ToUint8Array(base64String) {
+                const padding = '='.repeat((4 - base64String.length % 4) % 4);
+                const base64 = (base64String + padding)
+                    .replace(/\-/g, '+')
+                    .replace(/_/g, '/');
+
+                const rawData = window.atob(base64);
+                const outputArray = new Uint8Array(rawData.length);
+
+                for (let i = 0; i < rawData.length; ++i) {
+                    outputArray[i] = rawData.charCodeAt(i);
+                }
+                return outputArray;
+            }
+
+
+            // 8. Assignation des gestionnaires d'événements WebSocket aux propriétés de la websocket
+            // Les fonctions onWebSocketOpen, onWebSocketMessage, etc. sont définies juste au-dessus, DANS DOMContentLoaded.
+            // La websocket (variable globale) est créée AVANT DOMContentLoaded.
+            websocket.onopen = onWebSocketOpen;
+            websocket.onmessage = onWebSocketMessage;
+            websocket.onclose = onWebSocketClose;
+            websocket.onerror = onWebSocketError;
+
+
+             // 9. Écouteurs d'événements DOM (Assignés DANS DOMContentLoaded)
+             // Ils appellent les fonctions de logique (définies plus haut).
+             // Les variables d'éléments HTML (constantes locales à DOMContentLoaded) sont accessibles ici.
+             sendButton.addEventListener('click', sendMessage);
+
+             messageInput.addEventListener('input', () => {
+                  if (!activeConversationId) return;
+                  if (!isTyping) { sendTypingStatus(true); }
+                  clearTimeout(typingTimer);
+                  typingTimer = setTimeout(() => { sendTypingStatus(false); }, TYPING_TIMEOUT);
+             });
+
+             messageInput.addEventListener('keypress', function(event) {
+                  if (!messageInput.disabled && event.key === 'Enter') {
+                      event.preventDefault();
+                      sendMessage();
+                  }
+             });
+
+             addUserButton.addEventListener('click', () => {
+                 sendManageMembershipCommand('add');
+             });
+
+             removeUserButton.addEventListener('click', () => {
+                 sendManageMembershipCommand('remove');
+             });
+
+             manageUserNameInput.addEventListener('keypress', function(event) {
+                  if (event.key === 'Enter') {
+                      event.preventDefault();
+                      sendManageMembershipCommand('add');
+                  }
+             });
+
+              createConversationButton.addEventListener('click', () => {
+                  requestCreateConversation();
+              });
+
+              newConversationNameInput.addEventListener('keypress', function(event) {
+                  if (event.key === 'Enter') {
+                      event.preventDefault();
+                      requestCreateConversation();
+                  }
+              });
+
+             // Note: Les écouteurs pour les boutons de conversation sont ajoutés dynamiquement
+             // DANS le case 'availableConversations' du handler onmessage, et ils appellent joinConversation.
+
+
+             // 10. Appels initiaux DANS DOMContentLoaded
+             console.log('Making initial calls...');
+             toggleInput(false);
+             toggleConversationButtons(false);
+             toggleCreateGroupInput(false);
+              updateAdminDisplay(null, false); // Cela va aussi déclencher la demande de la liste autorisée si l'admin est détecté
+
+
+              // askForName() sera appelée par le message system "Bienvenue..." du serveur.
+        }); // Fin de l'écouteur DOMContentLoaded
+
+
+        // Le code de la création de la websocket et les déclarations
+        // des variables globales (userName, activeConversationId, etc., qui ne sont PAS des références DOM)
+        // sont PLACÉS EN DEHORS ET AVANT l'écouteur DOMContentLoaded.
+        // Les définitions des fonctions SONT AUSSI DANS DOMContentLoaded (voir ci-dessus).
+
+
+    </script>
+
+</body>
+</html>
